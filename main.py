@@ -757,7 +757,7 @@ with cmd_tab:
             st.dataframe(
                 command_view[
                     [
-                        "timestamp", "src_ip", "session", "username",
+                        "timestamp", "src_ip", "session",
                         "Command preview",
                     ]
                 ].sort_values("timestamp", ascending=False),
