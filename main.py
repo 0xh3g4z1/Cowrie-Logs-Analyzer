@@ -1,4 +1,5 @@
 import gzip
+import hashlib
 import ipaddress
 import json
 import os
@@ -89,7 +90,13 @@ def parse_logs(files):
                     f"{filename}: invalid JSON at line {line_number}"
                 )
 
-    df = pd.DataFrame(records)
+    columns = [
+        "timestamp", "eventid", "src_ip", "src_port", "dst_ip", "dst_port",
+        "session", "username", "password", "input", "message", "outfile",
+        "shasum", "sensor", "protocol", "version", "hassh", "duration_ms",
+        "source_file", "line_number", "raw",
+    ]
+    df = pd.DataFrame(records, columns=columns)
 
     if not df.empty:
         df["timestamp"] = pd.to_datetime(
@@ -106,23 +113,46 @@ def parse_logs(files):
         for column in string_columns:
             df[column] = df[column].fillna("").astype(str)
 
+        for column in ["src_port", "dst_port", "duration_ms"]:
+            df[column] = pd.to_numeric(df[column], errors="coerce")
+
         df["src_ip"] = df["src_ip"].replace("", "unknown")
         df["session"] = df["session"].replace("", "unknown")
 
     return df, errors
 
 
+def resolve_data_root(folder):
+    if folder is None or not folder.exists() or not folder.is_dir():
+        return folder
+
+    if folder.name in {"logs", "log"} and folder.parent.exists():
+        return folder.parent
+
+    if (folder / "logs").is_dir() or (folder / "log").is_dir():
+        return folder
+
+    return folder
+
+
 def find_log_files(folder):
-    if not folder.is_dir():
+    if not folder or not folder.is_dir():
         return []
 
-    return sorted(
-        path
-        for path in folder.rglob("*")
-        if path.is_file()
-        and not path.is_symlink()
-        and LOG_FILE_PATTERN.search(path.name)
-    )
+    search_roots = []
+    base = resolve_data_root(folder)
+
+    for candidate in [base, base / "logs", base / "log"]:
+        if candidate.is_dir() and candidate not in search_roots:
+            search_roots.append(candidate)
+
+    matches = []
+    for root in search_roots:
+        for path in root.rglob("*"):
+            if path.is_file() and not path.is_symlink() and LOG_FILE_PATTERN.search(path.name):
+                matches.append(path)
+
+    return sorted(set(matches))
 
 
 def read_folder(folder):
@@ -133,6 +163,44 @@ def read_folder(folder):
         except OSError:
             pass
     return files
+
+
+def build_lib_manifest(folder):
+    if folder is None or not folder.exists():
+        return []
+
+    root = resolve_data_root(folder)
+    lib_dir = root / "lib"
+    if not lib_dir.is_dir():
+        return []
+
+    manifest = []
+    for path in sorted(lib_dir.rglob("*")):
+        if not path.is_file() or path.is_symlink():
+            continue
+
+        try:
+            relative_path = path.relative_to(folder)
+            size = path.stat().st_size
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError:
+            continue
+
+        manifest.append({
+            "path": str(path),
+            "relative_path": str(relative_path),
+            "name": path.name,
+            "parent": str(path.parent.relative_to(folder)),
+            "kind": (
+                "downloads"
+                if "downloads" in relative_path.parts
+                else "config"
+            ),
+            "size_bytes": size,
+            "sha256": digest,
+        })
+
+    return manifest
 
 
 def validate_log_path(path, folder):
@@ -210,6 +278,27 @@ def command_preview(value, limit=160):
     return compact
 
 
+def preview_file_contents(path, limit=4000):
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return None
+
+    if not data:
+        return ""
+
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        sample = data[:limit]
+        return sample.hex()
+
+    text = text.replace("\r\n", "\n")
+    if len(text) > limit:
+        return text[:limit] + "\n... (truncated)"
+    return text
+
+
 # --------------------------------------------------
 # Sidebar: data sources
 # --------------------------------------------------
@@ -235,10 +324,12 @@ files = []
 if folder:
     files.extend(read_folder(folder))
 
-if not files:
+lib_manifest = build_lib_manifest(folder)
+
+if not files and not lib_manifest:
     st.warning(
-        "Enter the path to your log folder "
-        "in the sidebar."
+        "Enter the path to your log folder in the sidebar or place a "
+        "Cowrie lib/ directory inside the selected data folder."
     )
     st.code(
         "streamlit run main.py",
@@ -249,7 +340,7 @@ if not files:
 with st.spinner("Reading and parsing Cowrie events..."):
     df, errors = parse_logs(tuple(files))
 
-if df.empty:
+if df.empty and not lib_manifest:
     st.error(
         "No valid JSON events were found. Check that you selected "
         "Cowrie JSON logs containing one JSON object per line."
@@ -395,7 +486,7 @@ file_events = filtered[
 
 st.subheader("Threat activity overview")
 
-a, b, c, d, e = st.columns(5)
+a, b, c, d, e, f = st.columns(6)
 
 a.metric("Events", f"{len(filtered):,}")
 
@@ -412,10 +503,12 @@ known_sessions = filtered.loc[
 c.metric("Sessions", f"{known_sessions:,}")
 d.metric("Commands", f"{len(commands):,}")
 e.metric("Failed logins", f"{len(failed_logins):,}")
+f.metric("Lib artifacts", f"{len(lib_manifest):,}")
 
 st.caption(
-    f"Analyzing {len(files)} file(s), "
-    f"containing {len(df):,} valid events before filters."
+    f"Analyzing {len(files)} log file(s), "
+    f"{len(lib_manifest)} lib artifact(s), and "
+    f"{len(df):,} valid events before filters."
 )
 
 overview, ips_tab, auth_tab, cmd_tab, session_tab, files_tab, raw_tab = (
@@ -483,7 +576,7 @@ with overview:
             .head(20)
             .rename_axis("Command")
             .reset_index(name="Occurrences"),
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
     else:
@@ -535,7 +628,7 @@ with ips_tab:
 
         st.dataframe(
             ip_summary,
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
 
@@ -569,7 +662,7 @@ with ips_tab:
                     "username", "input",
                 ]
             ],
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
 
@@ -595,7 +688,7 @@ with auth_tab:
             auth_view[
                 ["timestamp", "src_ip", "session", "username", "password", "Result"]
             ].sort_values("timestamp", ascending=False),
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
 
@@ -610,7 +703,7 @@ with auth_tab:
                 .head(20)
                 .rename_axis("Username")
                 .reset_index(name="Attempts"),
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
 
@@ -623,7 +716,7 @@ with auth_tab:
                 .head(20)
                 .rename_axis("Password")
                 .reset_index(name="Attempts"),
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
 
@@ -668,7 +761,7 @@ with cmd_tab:
                         "Command preview",
                     ]
                 ].sort_values("timestamp", ascending=False),
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
 
@@ -700,7 +793,7 @@ with cmd_tab:
                 common_commands[
                     ["Command preview", "Occurrences", "input length"]
                 ],
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
 
@@ -723,7 +816,7 @@ with cmd_tab:
                     "Command preview", "message",
                 ]
             ].sort_values("timestamp", ascending=False),
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
         outcome_index = st.selectbox(
@@ -773,7 +866,7 @@ with session_tab:
                         "input", "message", "outfile", "shasum",
                     ]
                 ],
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
 
@@ -798,7 +891,7 @@ with files_tab:
                     "session", "outfile", "shasum", "message",
                 ]
             ].sort_values("timestamp", ascending=False),
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
 
@@ -806,17 +899,62 @@ with files_tab:
             file_events["shasum"].str.strip() != ""
         ]["shasum"].value_counts()
 
-        if not hashes.empty:
-            st.subheader("Observed hashes")
+    st.subheader("lib artifacts")
 
+    if not lib_manifest:
+        st.info(
+            "No Cowrie lib directory was found under the selected data folder. "
+            "Cowrie typically stores files like SSH keys, UUIDs, tty state, and "
+            "downloaded samples under a local lib/ directory."
+        )
+    else:
+        lib_df = pd.DataFrame(lib_manifest)
+        lib_table = lib_df[
+            ["relative_path", "kind", "size_bytes", "sha256"]
+        ].rename(columns={
+            "relative_path": "Path",
+            "kind": "Type",
+            "size_bytes": "Size (bytes)",
+            "sha256": "SHA256",
+        })
+
+        st.dataframe(
+            lib_table,
+            width="stretch",
+            hide_index=True,
+        )
+
+        lib_downloads = lib_df[lib_df["kind"] == "downloads"]
+        if not lib_downloads.empty:
+            st.subheader("Downloaded artifacts")
             st.dataframe(
-                hashes.rename_axis("SHA hash").reset_index(
-                    name="Occurrences"
-                ),
-                use_container_width=True,
+                lib_downloads[
+                    ["relative_path", "size_bytes", "sha256"]
+                ].rename(columns={
+                    "relative_path": "Path",
+                    "size_bytes": "Size (bytes)",
+                    "sha256": "SHA256",
+                }),
+                width="stretch",
                 hide_index=True,
             )
 
+        selected_artifact = st.selectbox(
+            "Inspect lib file contents",
+            lib_df["relative_path"].tolist(),
+            key="inspect_lib_artifact",
+        )
+
+        selected_path = Path(
+            lib_df.loc[lib_df["relative_path"] == selected_artifact, "path"].iloc[0]
+        )
+        st.write(f"Selected file: {selected_artifact}")
+        preview = preview_file_contents(selected_path)
+
+        if preview is None:
+            st.warning("The selected file could not be read.")
+        else:
+            st.code(preview, language="text")
 
 # --------------------------------------------------
 # Raw events
@@ -848,7 +986,7 @@ with raw_tab:
                     "input", "message", "source_file", "line_number",
                 ]
             ].sort_values("timestamp", ascending=False),
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
 

@@ -5,6 +5,30 @@ threat activity and supports filtering, source-IP investigation, authentication
 and command analysis, attacker-session reconstruction, file/hash review, and
 raw event inspection. Individual events can be removed from their source log.
 
+## Features
+
+- Recursive scanning of local Cowrie log folders and support for `.json`,
+  `.jsonl`, `.log`, and gzip-compressed log files
+- Sidebar filters for event type, source IP, full-text search, and date range
+- Threat activity overview with event counts, source-IP summaries, command totals,
+  and login outcomes
+- Source IP investigation with per-IP event breakdowns and direct IP lookups
+- Authentication analysis for failed and successful login attempts, including
+  most-used usernames and passwords
+- Command investigation with searchable command inputs, common command review,
+  and Cowrie command-resolution outcomes
+- Session reconstruction to inspect all events tied to a specific attacker
+  session ID
+- File activity tracking for uploads/downloads, output file names, and observed
+  SHA hashes
+- Cowrie lib directory review for SSH keys, UUIDs, tty state, and downloaded
+  artifacts stored under a local `data/lib/` folder
+- Artifact inspection for selected lib files, including text preview or hex dump
+  fallback for binary content
+- Raw event browser for viewing the original JSON payload for any selected event
+- Optional permanent removal of a selected event from its source log after user
+  confirmation
+
 ## Requirements
 
 - Python 3.12
@@ -33,11 +57,37 @@ streamlit run main.py
 Open the local URL printed by Streamlit. The app initially scans the `data/`
 folder recursively; use the sidebar to select a different folder.
 
+## Data layout
+
+Cowrie data can be organized like this:
+
+```text
+data/
+├── lib/
+│   ├── downloads/
+│   ├── ssh_host_rsa_key
+│   ├── uuid
+│   └── tty
+└── logs/
+    ├── cowrie.json
+    └── cowrie.json.2026-10-09
+```
+
+The analyzer reads JSON event files from `data/logs/` and inventories the
+`data/lib/` directory for SSH keys, UUIDs, tty state, and downloaded artifacts.
+From the File activity section, you can also select a lib artifact and inspect its
+contents directly.
+
 ## Log data
 
-Keep your log files in `data/` or another local folder. Log data is excluded
-from Git because it can contain sensitive IP addresses, credentials, and
-attacker activity. Do not commit real or sensitive logs to a public repository.
+Keep your log files in `data/logs/` or another local folder. If your Cowrie
+install includes a `data/lib/` directory, the app will also inventory that
+folder and surface its SSH keys, UUID, tty state, and downloaded artifacts for
+review.
+
+Log data is excluded from Git because it can contain sensitive IP addresses,
+credentials, and attacker activity. Do not commit real or sensitive logs to a
+public repository.
 
 Deleting an event permanently removes its JSON line from the source log. Back up
 the log first if you need to preserve the original data.
@@ -60,3 +110,11 @@ features, and documentation updates.
 
 Please avoid committing real Cowrie log data or any sensitive telemetry to the
 repository.
+
+## License
+
+This project is licensed under the MIT License. See the LICENSE file in this
+repository for the full text.
+
+The project is provided as-is for local analysis and research use, and it is
+intended to help inspect Cowrie telemetry responsibly and securely.
