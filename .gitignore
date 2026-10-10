@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+
+# Local configuration and secrets
+.streamlit/secrets.toml
+.env
+.env.*
+
+# Local Cowrie logs and data
+data/*
+!data/.gitkeep
+
+# Editor and operating-system files
+.vscode/
