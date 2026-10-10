@@ -502,8 +502,8 @@ known_sessions = filtered.loc[
 
 c.metric("Sessions", f"{known_sessions:,}")
 d.metric("Commands", f"{len(commands):,}")
-e.metric("Failed logins", f"{len(failed_logins):,}")
-f.metric("Lib artifacts", f"{len(lib_manifest):,}")
+e.metric("Successful logins", f"{len(successful_logins):,}")
+f.metric("Artifacts", f"{len(lib_manifest):,}")
 
 st.caption(
     f"Analyzing {len(files)} log file(s), "
@@ -750,6 +750,9 @@ with cmd_tab:
         if command_view.empty:
             st.info("No commands match your search.")
         else:
+            command_view["Occurrences"] = command_view.groupby("input")[
+                "input"
+            ].transform("size")
             command_view["Command preview"] = command_view["input"].map(
                 command_preview
             )
@@ -757,7 +760,7 @@ with cmd_tab:
             st.dataframe(
                 command_view[
                     [
-                        "timestamp", "src_ip", "session",
+                        "timestamp", "src_ip", "session", "Occurrences",
                         "Command preview",
                     ]
                 ].sort_values("timestamp", ascending=False),
@@ -774,28 +777,6 @@ with cmd_tab:
                 ),
             )
             st.code(command_view.loc[command_index, "input"], language="bash")
-
-            st.subheader("Common commands")
-
-            common_commands = (
-                command_view["input"]
-                .value_counts()
-                .head(100)
-                .rename_axis("input")
-                .reset_index(name="Occurrences")
-            )
-            common_commands["Command preview"] = common_commands[
-                "input"
-            ].map(command_preview)
-            common_commands["input length"] = common_commands["input"].str.len()
-
-            st.dataframe(
-                common_commands[
-                    ["Command preview", "Occurrences", "input length"]
-                ],
-                width="stretch",
-                hide_index=True,
-            )
 
     st.subheader("Command resolution outcomes")
     st.caption(
@@ -819,16 +800,6 @@ with cmd_tab:
             width="stretch",
             hide_index=True,
         )
-        outcome_index = st.selectbox(
-            "Inspect full outcome input",
-            command_outcomes.index.tolist(),
-            format_func=lambda index: (
-                f"{command_outcomes.loc[index, 'Result']} | "
-                f"{command_preview(command_outcomes.loc[index, 'input'], 80)}"
-            ),
-        )
-        st.code(command_outcomes.loc[outcome_index, "input"], language="bash")
-
 
 # --------------------------------------------------
 # Session reconstruction
