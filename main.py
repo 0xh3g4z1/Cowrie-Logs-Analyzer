@@ -328,8 +328,7 @@ lib_manifest = build_lib_manifest(folder)
 
 if not files and not lib_manifest:
     st.warning(
-        "Enter the path to your log folder in the sidebar or place a "
-        "Cowrie lib/ directory inside the selected data folder."
+        "Enter the path to your log folder in the sidebar"
     )
     st.code(
         "streamlit run main.py",
@@ -581,15 +580,6 @@ with overview:
         )
     else:
         st.info("No command events match your filters.")
-
-    st.subheader("Login outcome")
-
-    outcomes = pd.Series({
-        "Failed": len(failed_logins),
-        "Successful": len(successful_logins),
-    })
-
-    st.bar_chart(outcomes)
 
 
 # --------------------------------------------------
