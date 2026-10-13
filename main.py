@@ -740,20 +740,19 @@ with cmd_tab:
         if command_view.empty:
             st.info("No commands match your search.")
         else:
-            command_view["Occurrences"] = command_view.groupby("input")[
-                "input"
-            ].transform("size")
-            command_view["Command preview"] = command_view["input"].map(
-                command_preview
+            command_summary = (
+                command_view.groupby("input", as_index=False)
+                .size()
+                .rename(columns={"size": "Occurrences"})
             )
+            command_summary["Command preview"] = command_summary[
+                "input"
+            ].map(command_preview)
 
             st.dataframe(
-                command_view[
-                    [
-                        "timestamp", "src_ip", "session", "Occurrences",
-                        "Command preview",
-                    ]
-                ].sort_values("timestamp", ascending=False),
+                command_summary[
+                    ["Occurrences", "Command preview"]
+                ].sort_values("Occurrences", ascending=False),
                 width="stretch",
                 hide_index=True,
             )
