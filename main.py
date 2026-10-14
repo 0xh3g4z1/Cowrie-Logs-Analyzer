@@ -23,10 +23,6 @@ LOG_FILE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 COMMAND_EVENT_IDS = {"cowrie.command", "cowrie.command.input"}
-COMMAND_OUTCOME_LABELS = {
-    "cowrie.command.success": "Recognized",
-    "cowrie.command.failed": "Not recognized",
-}
 
 
 @st.cache_data(show_spinner=False)
@@ -73,7 +69,6 @@ def parse_logs(files):
                     "message": event.get("message", ""),
                     "outfile": event.get("outfile", ""),
                     "shasum": event.get("shasum", ""),
-                    "sensor": event.get("sensor", ""),
                     "protocol": event.get("protocol", ""),
                     "version": event.get("version", ""),
                     "hassh": event.get("hassh", ""),
@@ -93,7 +88,7 @@ def parse_logs(files):
     columns = [
         "timestamp", "eventid", "src_ip", "src_port", "dst_ip", "dst_port",
         "session", "username", "password", "input", "message", "outfile",
-        "shasum", "sensor", "protocol", "version", "hassh", "duration_ms",
+        "shasum", "protocol", "version", "hassh", "duration_ms",
         "source_file", "line_number", "raw",
     ]
     df = pd.DataFrame(records, columns=columns)
@@ -106,7 +101,7 @@ def parse_logs(files):
         string_columns = [
             "eventid", "src_ip", "session", "username",
             "password", "input", "message", "outfile",
-            "shasum", "sensor", "protocol", "dst_ip",
+            "shasum", "protocol", "dst_ip",
             "version", "hassh",
         ]
 
@@ -175,30 +170,37 @@ def build_lib_manifest(folder):
         return []
 
     manifest = []
-    for path in sorted(lib_dir.rglob("*")):
-        if not path.is_file() or path.is_symlink():
-            continue
+    for current_root, directories, filenames in os.walk(str(lib_dir)):
+        directories[:] = sorted(
+            directory
+            for directory in directories
+            if directory.lower() != "tty"
+            and not (Path(current_root) / directory).is_symlink()
+        )
 
-        try:
-            relative_path = path.relative_to(folder)
-            size = path.stat().st_size
-            digest = hashlib.sha256(path.read_bytes()).hexdigest()
-        except OSError:
-            continue
+        for filename in sorted(filenames):
+            path = Path(current_root) / filename
+            if not path.is_file() or path.is_symlink():
+                continue
 
-        manifest.append({
-            "path": str(path),
-            "relative_path": str(relative_path),
-            "name": path.name,
-            "parent": str(path.parent.relative_to(folder)),
-            "kind": (
-                "downloads"
-                if "downloads" in relative_path.parts
-                else "config"
-            ),
-            "size_bytes": size,
-            "sha256": digest,
-        })
+            try:
+                relative_path = path.relative_to(folder)
+                size = path.stat().st_size
+                digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            except OSError:
+                continue
+
+            manifest.append({
+                "path": str(path),
+                "relative_path": str(relative_path),
+                "kind": (
+                    "downloads"
+                    if "downloads" in relative_path.parts
+                    else "config"
+                ),
+                "size_bytes": size,
+                "sha256": digest,
+            })
 
     return manifest
 
@@ -314,7 +316,6 @@ with st.sidebar:
     )
 
 folder = Path(folder_text).expanduser() if folder_text.strip() else None
-log_paths = find_log_files(folder) if folder else []
 
 if "deleted_event_notice" in st.session_state:
     st.sidebar.success(st.session_state.pop("deleted_event_notice"))
@@ -446,18 +447,6 @@ commands = filtered[
     & (filtered["input"].str.strip() != "")
 ]
 
-command_outcomes = filtered[
-    filtered["eventid"].isin(COMMAND_OUTCOME_LABELS)
-    & (filtered["input"].str.strip() != "")
-].copy()
-command_outcomes["Result"] = command_outcomes["eventid"].map(
-    COMMAND_OUTCOME_LABELS
-)
-
-failed_logins = filtered[
-    filtered["eventid"] == "cowrie.login.failed"
-]
-
 successful_logins = filtered[
     filtered["eventid"] == "cowrie.login.success"
 ]
@@ -506,7 +495,7 @@ f.metric("Artifacts", f"{len(lib_manifest):,}")
 
 st.caption(
     f"Analyzing {len(files)} log file(s), "
-    f"{len(lib_manifest)} lib artifact(s), and "
+    f"{len(lib_manifest)} artifact(s), and "
     f"{len(df):,} valid events before filters."
 )
 
@@ -751,8 +740,34 @@ with cmd_tab:
 
             st.dataframe(
                 command_summary[
-                    ["Occurrences", "Command preview"]
+                    ["Command preview", "Occurrences"]
                 ].sort_values("Occurrences", ascending=False),
+                column_config={
+                    "Command preview": st.column_config.TextColumn(width="large"),
+                    "Occurrences": st.column_config.NumberColumn(width="small"),
+                },
+                width="stretch",
+                hide_index=True,
+            )
+
+            st.subheader("Command event details")
+            command_details = command_view[
+                [
+                    "timestamp", "src_ip", "session", "src_port", "input",
+                ]
+            ].rename(columns={
+                "timestamp": "Time (UTC)",
+                "src_ip": "Source IP",
+                "session": "Session",
+                "src_port": "Source port",
+                "input": "Command",
+            }).sort_values("Time (UTC)", ascending=False)
+
+            st.dataframe(
+                command_details,
+                column_config={
+                    "Command": st.column_config.TextColumn(width="large"),
+                },
                 width="stretch",
                 hide_index=True,
             )
@@ -767,28 +782,6 @@ with cmd_tab:
             )
             st.code(command_view.loc[command_index, "input"], language="bash")
 
-    st.subheader("Command resolution outcomes")
-    st.caption(
-        "Recognized means Cowrie found a command handler; it does not "
-        "confirm the command completed successfully."
-    )
-
-    if command_outcomes.empty:
-        st.info("No command resolution outcomes match your filters.")
-    else:
-        command_outcomes["Command preview"] = command_outcomes[
-            "input"
-        ].map(command_preview)
-        st.dataframe(
-            command_outcomes[
-                [
-                    "timestamp", "src_ip", "session", "Result",
-                    "Command preview", "message",
-                ]
-            ].sort_values("timestamp", ascending=False),
-            width="stretch",
-            hide_index=True,
-        )
 
 # --------------------------------------------------
 # Session reconstruction
@@ -823,7 +816,7 @@ with session_tab:
                         "timestamp", "eventid", "src_ip",
                         "src_port", "dst_ip", "dst_port", "protocol",
                         "version", "hassh", "duration_ms", "username",
-                        "input", "message", "outfile", "shasum",
+                        "input", "message", "shasum",
                     ]
                 ],
                 width="stretch",
@@ -848,24 +841,19 @@ with files_tab:
             file_events[
                 [
                     "timestamp", "eventid", "src_ip",
-                    "session", "outfile", "shasum", "message",
+                    "session", "shasum", "message",
                 ]
             ].sort_values("timestamp", ascending=False),
             width="stretch",
             hide_index=True,
         )
-
-        hashes = file_events[
-            file_events["shasum"].str.strip() != ""
-        ]["shasum"].value_counts()
-
     st.subheader("lib artifacts")
 
     if not lib_manifest:
         st.info(
             "No Cowrie lib directory was found under the selected data folder. "
-            "Cowrie typically stores files like SSH keys, UUIDs, tty state, and "
-            "downloaded samples under a local lib/ directory."
+            "Cowrie typically stores files like SSH keys, UUIDs, and downloaded "
+            "samples under a local lib/ directory."
         )
     else:
         lib_df = pd.DataFrame(lib_manifest)

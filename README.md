@@ -15,14 +15,15 @@ raw event inspection. Individual events can be removed from their source log.
 - Source IP investigation with per-IP event breakdowns and direct IP lookups
 - Authentication analysis for failed and successful login attempts, including
   most-used usernames and passwords
-- Command investigation with searchable command inputs, common command review,
-  and Cowrie command-resolution outcomes
+- Command investigation with searchable command inputs, occurrence summaries,
+  and event details showing UTC time, source IP, session, source port, and the
+  full command
 - Session reconstruction to inspect all events tied to a specific attacker
   session ID
 - File activity tracking for uploads/downloads, output file names, and observed
   SHA hashes
-- Cowrie lib directory review for SSH keys, UUIDs, tty state, and downloaded
-  artifacts stored under a local `data/lib/` folder
+- Cowrie lib directory review for SSH keys, UUIDs, and downloaded artifacts
+  stored under a local `data/lib/` folder;
 - Artifact inspection for selected lib files, including text preview or hex dump
   fallback for binary content
 - Raw event browser for viewing the original JSON payload for any selected event
@@ -67,23 +68,20 @@ data/
 │   ├── downloads/
 │   ├── ssh_host_rsa_key
 │   ├── uuid
-│   └── tty
+│   └── tty/                 # excluded from artifact analysis
 └── logs/
     ├── cowrie.json
     └── cowrie.json.2026-10-09
 ```
 
-The analyzer reads JSON event files from `data/logs/` and inventories the
-`data/lib/` directory for SSH keys, UUIDs, tty state, and downloaded artifacts.
-From the File activity section, you can also select a lib artifact and inspect its
-contents directly.
+The analyzer reads JSON event files from `data/logs/` and inventories files in
+`data/lib/` for SSH keys, UUIDs, and downloaded artifacts.
 
 ## Log data
 
 Keep your log files in `data/logs/` or another local folder. If your Cowrie
 install includes a `data/lib/` directory, the app will also inventory that
-folder and surface its SSH keys, UUID, tty state, and downloaded artifacts for
-review.
+folder and surface its SSH keys, UUID, and downloaded artifacts for review.
 
 Log data is excluded from Git because it can contain sensitive IP addresses,
 credentials, and attacker activity. Do not commit real or sensitive logs to a
