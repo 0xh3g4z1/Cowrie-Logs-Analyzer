@@ -10,12 +10,12 @@ import pandas as pd
 import streamlit as st
 
 st.set_page_config(
-    page_title="Cowrie Log Analyzer",
+    page_title="Cowrie Logs Analyzer",
     page_icon="🛡️",
     layout="wide",
 )
 
-st.title("Cowrie Log Analyzer")
+st.title("Cowrie Logs Analyzer")
 
 DEFAULT_DIR = Path(__file__).parent / "data"
 LOG_FILE_PATTERN = re.compile(
@@ -771,16 +771,6 @@ with cmd_tab:
                 width="stretch",
                 hide_index=True,
             )
-
-            command_index = st.selectbox(
-                "Inspect full command input",
-                command_view.index.tolist(),
-                format_func=lambda index: (
-                    f"{command_view.loc[index, 'timestamp']} | "
-                    f"{command_preview(command_view.loc[index, 'input'], 80)}"
-                ),
-            )
-            st.code(command_view.loc[command_index, "input"], language="bash")
 
 
 # --------------------------------------------------
