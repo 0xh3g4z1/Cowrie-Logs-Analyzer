@@ -160,51 +160,6 @@ def read_folder(folder):
     return files
 
 
-def build_lib_manifest(folder):
-    if folder is None or not folder.exists():
-        return []
-
-    root = resolve_data_root(folder)
-    lib_dir = root / "lib"
-    if not lib_dir.is_dir():
-        return []
-
-    manifest = []
-    for current_root, directories, filenames in os.walk(str(lib_dir)):
-        directories[:] = sorted(
-            directory
-            for directory in directories
-            if directory.lower() != "tty"
-            and not (Path(current_root) / directory).is_symlink()
-        )
-
-        for filename in sorted(filenames):
-            path = Path(current_root) / filename
-            if not path.is_file() or path.is_symlink():
-                continue
-
-            try:
-                relative_path = path.relative_to(folder)
-                size = path.stat().st_size
-                digest = hashlib.sha256(path.read_bytes()).hexdigest()
-            except OSError:
-                continue
-
-            manifest.append({
-                "path": str(path),
-                "relative_path": str(relative_path),
-                "kind": (
-                    "downloads"
-                    if "downloads" in relative_path.parts
-                    else "config"
-                ),
-                "size_bytes": size,
-                "sha256": digest,
-            })
-
-    return manifest
-
-
 def validate_log_path(path, folder):
     root = folder.resolve(strict=True)
     target = path.resolve(strict=True)
@@ -280,27 +235,6 @@ def command_preview(value, limit=160):
     return compact
 
 
-def preview_file_contents(path, limit=4000):
-    try:
-        data = path.read_bytes()
-    except OSError:
-        return None
-
-    if not data:
-        return ""
-
-    try:
-        text = data.decode("utf-8")
-    except UnicodeDecodeError:
-        sample = data[:limit]
-        return sample.hex()
-
-    text = text.replace("\r\n", "\n")
-    if len(text) > limit:
-        return text[:limit] + "\n... (truncated)"
-    return text
-
-
 # --------------------------------------------------
 # Sidebar: data sources
 # --------------------------------------------------
@@ -325,9 +259,7 @@ files = []
 if folder:
     files.extend(read_folder(folder))
 
-lib_manifest = build_lib_manifest(folder)
-
-if not files and not lib_manifest:
+if not files:
     st.warning(
         "Enter the path to your log folder in the sidebar"
     )
@@ -340,7 +272,7 @@ if not files and not lib_manifest:
 with st.spinner("Reading and parsing Cowrie events..."):
     df, errors = parse_logs(tuple(files))
 
-if df.empty and not lib_manifest:
+if df.empty:
     st.error(
         "No valid JSON events were found. Check that you selected "
         "Cowrie JSON logs containing one JSON object per line."
@@ -458,23 +390,13 @@ auth = filtered[
     ])
 ]
 
-file_events = filtered[
-    filtered["eventid"].str.contains(
-        r"file_download|file_upload",
-        case=False,
-        na=False,
-    )
-    | (filtered["outfile"].str.strip() != "")
-    | (filtered["shasum"].str.strip() != "")
-]
-
 # --------------------------------------------------
 # Summary
 # --------------------------------------------------
 
 st.subheader("Threat activity overview")
 
-a, b, c, d, e, f = st.columns(6)
+a, b, c, d, e = st.columns(5)
 
 a.metric("Events", f"{len(filtered):,}")
 
@@ -491,22 +413,19 @@ known_sessions = filtered.loc[
 c.metric("Sessions", f"{known_sessions:,}")
 d.metric("Commands", f"{len(commands):,}")
 e.metric("Successful logins", f"{len(successful_logins):,}")
-f.metric("Artifacts", f"{len(lib_manifest):,}")
 
 st.caption(
-    f"Analyzing {len(files)} log file(s), "
-    f"{len(lib_manifest)} artifact(s), and "
+    f"Analyzing {len(files)} log file(s) and "
     f"{len(df):,} valid events before filters."
 )
 
-overview, ips_tab, auth_tab, cmd_tab, session_tab, files_tab, raw_tab = (
+overview, ips_tab, auth_tab, cmd_tab, session_tab, raw_tab = (
     st.tabs([
         "Overview",
         "Source IPs",
         "Authentication",
         "Commands",
         "Sessions",
-        "File activity",
         "Raw events",
     ])
 )
@@ -813,86 +732,6 @@ with session_tab:
                 hide_index=True,
             )
 
-
-# --------------------------------------------------
-# File activity
-# --------------------------------------------------
-
-with files_tab:
-    st.subheader("Recorded file activity and hashes")
-
-    if file_events.empty:
-        st.info(
-            "No matching file events were found. Some file activity "
-            "may be represented by different event types in your logs."
-        )
-    else:
-        st.dataframe(
-            file_events[
-                [
-                    "timestamp", "eventid", "src_ip",
-                    "session", "shasum", "message",
-                ]
-            ].sort_values("timestamp", ascending=False),
-            width="stretch",
-            hide_index=True,
-        )
-    st.subheader("lib artifacts")
-
-    if not lib_manifest:
-        st.info(
-            "No Cowrie lib directory was found under the selected data folder. "
-            "Cowrie typically stores files like SSH keys, UUIDs, and downloaded "
-            "samples under a local lib/ directory."
-        )
-    else:
-        lib_df = pd.DataFrame(lib_manifest)
-        lib_table = lib_df[
-            ["relative_path", "kind", "size_bytes", "sha256"]
-        ].rename(columns={
-            "relative_path": "Path",
-            "kind": "Type",
-            "size_bytes": "Size (bytes)",
-            "sha256": "SHA256",
-        })
-
-        st.dataframe(
-            lib_table,
-            width="stretch",
-            hide_index=True,
-        )
-
-        lib_downloads = lib_df[lib_df["kind"] == "downloads"]
-        if not lib_downloads.empty:
-            st.subheader("Downloaded artifacts")
-            st.dataframe(
-                lib_downloads[
-                    ["relative_path", "size_bytes", "sha256"]
-                ].rename(columns={
-                    "relative_path": "Path",
-                    "size_bytes": "Size (bytes)",
-                    "sha256": "SHA256",
-                }),
-                width="stretch",
-                hide_index=True,
-            )
-
-        selected_artifact = st.selectbox(
-            "Inspect lib file contents",
-            lib_df["relative_path"].tolist(),
-            key="inspect_lib_artifact",
-        )
-
-        selected_path = Path(
-            lib_df.loc[lib_df["relative_path"] == selected_artifact, "path"].iloc[0]
-        )
-        st.write(f"Selected file: {selected_artifact}")
-        preview = preview_file_contents(selected_path)
-
-        if preview is None:
-            st.warning("The selected file could not be read.")
-        else:
-            st.code(preview, language="text")
 
 # --------------------------------------------------
 # Raw events

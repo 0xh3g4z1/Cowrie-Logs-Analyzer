@@ -2,8 +2,8 @@
 
 A local Streamlit dashboard for exploring Cowrie JSON event logs. It summarizes
 threat activity and supports filtering, source-IP investigation, authentication
-and command analysis, attacker-session reconstruction, file/hash review, and
-raw event inspection. Individual events can be removed from their source log.
+and command analysis, attacker-session reconstruction, and raw event inspection.
+Individual events can be removed from their source log.
 
 ## Features
 
@@ -20,12 +20,6 @@ raw event inspection. Individual events can be removed from their source log.
   full command
 - Session reconstruction to inspect all events tied to a specific attacker
   session ID
-- File activity tracking for uploads/downloads, output file names, and observed
-  SHA hashes
-- Cowrie lib directory review for SSH keys, UUIDs, and downloaded artifacts
-  stored under a local `data/lib/` folder;
-- Artifact inspection for selected lib files, including text preview or hex dump
-  fallback for binary content
 - Raw event browser for viewing the original JSON payload for any selected event
 - Optional permanent removal of a selected event from its source log after user
   confirmation
@@ -60,28 +54,14 @@ folder recursively; use the sidebar to select a different folder.
 
 ## Data layout
 
-Cowrie data can be organized like this:
-
-```text
-data/
-├── lib/
-│   ├── downloads/
-│   ├── ssh_host_rsa_key
-│   ├── uuid
-│   └── tty/                 # excluded from artifact analysis
-└── logs/
-    ├── cowrie.json
-    └── cowrie.json.2026-10-09
-```
-
-The analyzer reads JSON event files from `data/logs/` and inventories files in
-`data/lib/` for SSH keys, UUIDs, and downloaded artifacts.
+The analyzer reads JSON event files from `data/logs/` and focuses on the
+session, authentication, command, and source-IP telemetry in those logs.
 
 ## Log data
 
-Keep your log files in `data/logs/` or another local folder. If your Cowrie
-install includes a `data/lib/` directory, the app will also inventory that
-folder and surface its SSH keys, UUID, and downloaded artifacts for review.
+Keep your log files in `data/logs/` or another local folder. The dashboard
+focuses on the Cowrie event stream itself and does not enumerate the local
+`data/lib/` artifact store.
 
 Log data is excluded from Git because it can contain sensitive IP addresses,
 credentials, and attacker activity. Do not commit real or sensitive logs to a
