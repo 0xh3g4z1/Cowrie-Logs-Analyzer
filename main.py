@@ -235,6 +235,14 @@ def command_preview(value, limit=160):
     return compact
 
 
+def _is_valid_ip(value):
+    try:
+        ipaddress.ip_address(str(value))
+        return True
+    except ValueError:
+        return False
+
+
 # --------------------------------------------------
 # Sidebar: data sources
 # --------------------------------------------------
@@ -243,7 +251,7 @@ with st.sidebar:
     st.header("Data source")
 
     folder_text = st.text_input(
-        "Or select a local folder",
+        "Select a local folder",
         value=str(DEFAULT_DIR) if DEFAULT_DIR.exists() else "",
         key="log_folder",
         help="The folder is searched recursively, including subfolders.",
@@ -447,7 +455,7 @@ with overview:
             .rename("Events")
         )
 
-        st.line_chart(timeline)
+        st.area_chart(timeline)
 
     else:
         st.info("No valid timestamps are available.")
@@ -455,24 +463,20 @@ with overview:
     left, right = st.columns(2)
 
     with left:
-        st.subheader("Most common event types")
-
-        event_counts = filtered["eventid"].value_counts().head(15)
-
+        st.subheader("Event types")
+        event_counts = filtered["eventid"].value_counts().head(10)
         if not event_counts.empty:
-            st.bar_chart(event_counts)
+            st.bar_chart(event_counts, horizontal=True)
+        else:
+            st.info("No event types to display.")
 
     with right:
         st.subheader("Most active source IPs")
-
-        ip_counts = (
-            filtered[filtered["src_ip"] != "unknown"]["src_ip"]
-            .value_counts()
-            .head(15)
-        )
-
+        ip_counts = filtered.loc[filtered["src_ip"] != "unknown", "src_ip"].value_counts().head(10)
         if not ip_counts.empty:
-            st.bar_chart(ip_counts)
+            st.bar_chart(ip_counts, horizontal=True)
+        else:
+            st.info("No known source IP addresses.")
 
     st.subheader("Most executed commands")
 
@@ -490,6 +494,7 @@ with overview:
         st.info("No command events match your filters.")
 
 
+
 # --------------------------------------------------
 # Source IP analysis
 # --------------------------------------------------
@@ -499,23 +504,32 @@ with ips_tab:
 
     if filtered.empty:
         st.info("No events match your filters.")
+
     else:
+        # Build source IP summary
         ip_summary = (
-            filtered.groupby("src_ip")
+            filtered.dropna(subset=["src_ip"])
+            .groupby("src_ip")
             .agg(
                 Events=("eventid", "size"),
                 Sessions=("session", "nunique"),
                 Commands=(
                     "eventid",
-                    lambda x: int(x.isin(COMMAND_EVENT_IDS).sum()),
+                    lambda x: int(
+                        x.isin(COMMAND_EVENT_IDS).sum()
+                    ),
                 ),
                 Failed_logins=(
                     "eventid",
-                    lambda x: int((x == "cowrie.login.failed").sum()),
+                    lambda x: int(
+                        (x == "cowrie.login.failed").sum()
+                    ),
                 ),
                 Successful_logins=(
                     "eventid",
-                    lambda x: int((x == "cowrie.login.success").sum()),
+                    lambda x: int(
+                        (x == "cowrie.login.success").sum()
+                    ),
                 ),
                 First_seen=("timestamp", "min"),
                 Last_seen=("timestamp", "max"),
@@ -524,45 +538,80 @@ with ips_tab:
             .reset_index()
         )
 
+        # Create a display-only copy with clickable IPinfo URLs
+        ip_summary_display = ip_summary.copy()
+
+        ip_summary_display["src_ip"] = ip_summary_display[
+            "src_ip"
+        ].apply(
+            lambda ip: (
+                f"https://ipinfo.io/{ip}"
+                if _is_valid_ip(ip)
+                else ""
+            )
+        )
+
         st.dataframe(
-            ip_summary,
+            ip_summary_display,
+            column_config={
+                "src_ip": st.column_config.LinkColumn(
+                    "Source IP",
+                    display_text=r"https://ipinfo\.io/(.*)",
+                    help="Click an IP address to open its IPinfo page.",
+                ),
+            },
             width="stretch",
             hide_index=True,
         )
 
-        selected_ip = st.selectbox(
-            "Investigate one IP",
-            sorted(filtered["src_ip"].unique()),
-            key="investigate_ip",
+        # Select an IP for detailed investigation
+        available_ips = sorted(
+            filtered["src_ip"].dropna().astype(str).unique()
         )
 
-        ip_events = filtered[
-            filtered["src_ip"] == selected_ip
-        ].sort_values("timestamp")
+        if not available_ips:
+            st.info("No source IP addresses are available.")
 
-        st.write(f"{len(ip_events):,} events associated with {selected_ip}")
-
-        try:
-            ip_address = ipaddress.ip_address(selected_ip)
-        except ValueError:
-            st.info("This source value is not a valid IP address to look up.")
         else:
-            st.link_button(
-                "Look up IP on ipinfo.io",
-                f"https://ipinfo.io/{ip_address}",
+            selected_ip = st.selectbox(
+                "Investigate one IP",
+                available_ips,
+                key="investigate_ip",
             )
 
-        st.dataframe(
-            ip_events[
-                [
-                    "timestamp", "eventid", "session", "protocol",
-                    "src_port", "dst_ip", "dst_port", "version",
-                    "username", "input",
-                ]
-            ],
-            width="stretch",
-            hide_index=True,
-        )
+            ip_events = filtered[
+                filtered["src_ip"].astype(str) == selected_ip
+            ].sort_values("timestamp")
+
+            st.write(
+                f"{len(ip_events):,} events associated with {selected_ip}"
+            )
+
+            # Display events for the selected IP
+            event_columns = [
+                "timestamp",
+                "eventid",
+                "session",
+                "protocol",
+                "src_port",
+                "dst_ip",
+                "dst_port",
+                "version",
+                "username",
+                "input",
+            ]
+
+            available_columns = [
+                col for col in event_columns
+                if col in ip_events.columns
+            ]
+
+            st.dataframe(
+                ip_events[available_columns],
+                width="stretch",
+                hide_index=True,
+            )
+
 
 
 # --------------------------------------------------
@@ -619,6 +668,7 @@ with auth_tab:
             )
 
 
+
 # --------------------------------------------------
 # Command investigation
 # --------------------------------------------------
@@ -627,110 +677,628 @@ with cmd_tab:
     st.subheader("Executed commands")
 
     if commands.empty:
-        st.info(
-            "No command input events match your filters."
-        )
+        st.info("No command input events match your filters.")
+
     else:
+        command_view = commands.copy()
+
+        # Ensure command input is treated as text
+        command_view["input"] = (
+            command_view["input"].fillna("").astype(str)
+        )
+
+        # --------------------------------------------------
+        # Command categorization
+        # --------------------------------------------------
+
+        def classify_command_insight(command):
+            cmd = str(command).lower().strip()
+
+            rules = {
+                "Reconnaissance": [
+                    "uname", "whoami", "id", "hostname", "pwd",
+                    "ifconfig", "ip addr", "ip route", "cat /etc/os-release",
+                    "cat /etc/passwd", "env", "printenv", "ls",
+                    "ps", "netstat", "ss -",
+                ],
+                "Download / Payload": [
+                    "wget ", "curl ", "tftp ", "ftp ",
+                    "busybox wget", "powershell -enc",
+                ],
+                "Permissions / Execution": [
+                    "chmod ", "chown ", "bash ", "sh ",
+                    "python -c", "perl -e", "nohup ",
+                ],
+                "Persistence": [
+                    "crontab", "authorized_keys", "systemctl ",
+                    "/etc/cron", "rc.local", "ssh-keygen",
+                ],
+                "Privilege Escalation": [
+                    "sudo ", "su ", "pkexec", "doas ",
+                ],
+                "Defense Evasion": [
+                    "history -c", "unset histfile",
+                    "iptables ", "ufw ", "rm -rf",
+                ],
+                "Cryptocurrency Mining": [
+                    "xmrig", "minerd", "stratum+tcp",
+                    "cryptonight", "monero",
+                ],
+                "Credential / Secret Access": [
+                    "/etc/shadow", ".ssh/id_rsa",
+                    ".aws/credentials", "authorized_keys",
+                ],
+            }
+
+            for category, indicators in rules.items():
+                if any(indicator in cmd for indicator in indicators):
+                    return category
+
+            return "Other"
+
+        command_view["Category"] = command_view["input"].map(
+            classify_command_insight
+        )
+
+        # Simple indicators: candidates for manual review, not proof
+        suspicious_patterns = [
+            "wget ", "curl ", "chmod ", "xmrig", "minerd",
+            "base64 -d", "/etc/shadow", "authorized_keys",
+            "crontab", "rm -rf", "nc -e", "bash -i",
+            "python -c", "perl -e",
+        ]
+
+        command_view["Review flag"] = command_view["input"].apply(
+            lambda cmd: (
+                "Review"
+                if any(
+                    pattern in cmd.lower()
+                    for pattern in suspicious_patterns
+                )
+                else ""
+            )
+        )
+
+        # --------------------------------------------------
+        # Search and category filters
+        # --------------------------------------------------
+
         command_query = st.text_input(
             "Filter command strings",
             placeholder="wget, curl, chmod, base64...",
+            key="command_investigation_search",
         )
 
-        command_view = commands.copy()
+        selected_categories = st.multiselect(
+            "Command categories",
+            options=sorted(command_view["Category"].unique()),
+            default=[],
+            key="command_investigation_categories",
+        )
+
+        flagged_only = st.checkbox(
+            "Show commands flagged for review only",
+            key="command_investigation_flagged",
+        )
 
         if command_query:
             command_view = command_view[
                 safe_contains(command_view["input"], command_query)
             ]
 
-        st.write(f"{len(command_view):,} command events")
+        if selected_categories:
+            command_view = command_view[
+                command_view["Category"].isin(selected_categories)
+            ]
+
+        if flagged_only:
+            command_view = command_view[
+                command_view["Review flag"] == "Review"
+            ]
+
+        st.write(f"{len(command_view):,} command events match your filters")
 
         if command_view.empty:
-            st.info("No commands match your search.")
+            st.info("No commands match your search and filters.")
+
         else:
+            # --------------------------------------------------
+            # Summary metrics
+            # --------------------------------------------------
+
+            unique_commands = command_view["input"].nunique()
+
+            flagged_events = int(
+                (command_view["Review flag"] == "Review").sum()
+            )
+
+            unique_sources = (
+                command_view["src_ip"].nunique()
+                if "src_ip" in command_view.columns
+                else 0
+            )
+
+            unique_sessions = (
+                command_view["session"].nunique()
+                if "session" in command_view.columns
+                else 0
+            )
+
+            m1, m2, m3, m4 = st.columns(4)
+
+            m1.metric("Command events", f"{len(command_view):,}")
+            m2.metric("Unique commands", f"{unique_commands:,}")
+            m3.metric("Flagged for review", f"{flagged_events:,}")
+            m4.metric("Source IPs", f"{unique_sources:,}")
+
+            st.caption(f"Distinct sessions: {unique_sessions:,}")
+
+            # --------------------------------------------------
+            # Category distribution
+            # --------------------------------------------------
+
+            st.subheader("Command category distribution")
+
+            category_counts = (
+                command_view["Category"]
+                .value_counts()
+                .rename_axis("Category")
+                .reset_index(name="Occurrences")
+            )
+
+            st.bar_chart(
+                category_counts.set_index("Category")["Occurrences"]
+            )
+
+            # --------------------------------------------------
+            # Most frequent commands
+            # --------------------------------------------------
+
+            st.subheader("Most frequent commands")
+
             command_summary = (
                 command_view.groupby("input", as_index=False)
-                .size()
-                .rename(columns={"size": "Occurrences"})
+                .agg(
+                    Occurrences=("input", "size"),
+                    Categories=("Category", "first"),
+                    Review=("Review flag", "first"),
+                )
             )
+
             command_summary["Command preview"] = command_summary[
                 "input"
             ].map(command_preview)
 
+            command_summary = command_summary.sort_values(
+                "Occurrences",
+                ascending=False,
+            )
+
             st.dataframe(
                 command_summary[
-                    ["Command preview", "Occurrences"]
-                ].sort_values("Occurrences", ascending=False),
+                    [
+                        "Command preview",
+                        "Occurrences",
+                        "Categories",
+                        "Review",
+                    ]
+                ],
                 column_config={
-                    "Command preview": st.column_config.TextColumn(width="large"),
-                    "Occurrences": st.column_config.NumberColumn(width="small"),
+                    "Command preview": st.column_config.TextColumn(
+                        width="large"
+                    ),
+                    "Occurrences": st.column_config.NumberColumn(
+                        width="small"
+                    ),
+                    "Categories": st.column_config.TextColumn(
+                        width="medium"
+                    ),
+                    "Review": st.column_config.TextColumn(
+                        width="small"
+                    ),
                 },
                 width="stretch",
                 hide_index=True,
             )
 
+            # --------------------------------------------------
+            # Source IPs associated with commands
+            # --------------------------------------------------
+
+            if "src_ip" in command_view.columns:
+                st.subheader("Sources issuing the most commands")
+
+                source_counts = (
+                    command_view.groupby("src_ip", as_index=False)
+                    .agg(
+                        Command_events=("input", "size"),
+                        Unique_commands=("input", "nunique"),
+                    )
+                    .sort_values(
+                        "Command_events",
+                        ascending=False,
+                    )
+                    .head(15)
+                )
+
+                st.dataframe(
+                    source_counts,
+                    width="stretch",
+                    hide_index=True,
+                )
+
+            # --------------------------------------------------
+            # Session investigation
+            # --------------------------------------------------
+
+            if "session" in command_view.columns:
+                sessions = sorted(
+                    command_view["session"]
+                    .dropna()
+                    .astype(str)
+                    .unique()
+                )
+
+                if sessions:
+                    st.subheader("Investigate command session")
+
+                    selected_session = st.selectbox(
+                        "Select a session",
+                        sessions,
+                        key="command_investigation_session",
+                    )
+
+                    session_events = command_view[
+                        command_view["session"].astype(str)
+                        == selected_session
+                    ].sort_values("timestamp")
+
+                    st.write(
+                        f"{len(session_events):,} matching commands "
+                        f"in session {selected_session}"
+                    )
+
+                    session_columns = [
+                        col for col in [
+                            "timestamp", "src_ip", "session",
+                            "input", "Category", "Review flag",
+                        ]
+                        if col in session_events.columns
+                    ]
+
+                    st.dataframe(
+                        session_events[session_columns],
+                        width="stretch",
+                        hide_index=True,
+                    )
+
+            # --------------------------------------------------
+            # Complete command event details
+            # --------------------------------------------------
+
             st.subheader("Command event details")
-            command_details = command_view[
-                [
-                    "timestamp", "src_ip", "session", "src_port", "input",
+
+            detail_columns = [
+                col for col in [
+                    "timestamp", "src_ip", "session", "src_port",
+                    "input", "Category", "Review flag",
                 ]
-            ].rename(columns={
-                "timestamp": "Time (UTC)",
-                "src_ip": "Source IP",
-                "session": "Session",
-                "src_port": "Source port",
-                "input": "Command",
-            }).sort_values("Time (UTC)", ascending=False)
+                if col in command_view.columns
+            ]
+
+            command_details = command_view[detail_columns].copy()
+
+            if "timestamp" in command_details.columns:
+                command_details = command_details.sort_values(
+                    "timestamp",
+                    ascending=False,
+                )
+
+            command_details = command_details.rename(
+                columns={
+                    "timestamp": "Time (UTC)",
+                    "src_ip": "Source IP",
+                    "session": "Session",
+                    "src_port": "Source port",
+                    "input": "Command",
+                }
+            )
 
             st.dataframe(
                 command_details,
                 column_config={
-                    "Command": st.column_config.TextColumn(width="large"),
+                    "Command": st.column_config.TextColumn(
+                        width="large"
+                    ),
+                    "Time (UTC)": st.column_config.DatetimeColumn(
+                        format="YYYY-MM-DD HH:mm:ss"
+                    ),
                 },
                 width="stretch",
                 hide_index=True,
             )
 
+            # --------------------------------------------------
+            # Export filtered command findings
+            # --------------------------------------------------
+
+            st.subheader("Export command findings")
+
+            export_data = command_details.to_csv(
+                index=False
+            ).encode("utf-8")
+
+            st.download_button(
+                "Download command findings as CSV",
+                data=export_data,
+                file_name="cowrie_command_findings.csv",
+                mime="text/csv",
+                key="download_command_findings",
+            )
+
+
 
 # --------------------------------------------------
-# Session reconstruction
+# Session reconstruction and investigation
 # --------------------------------------------------
 
 with session_tab:
     st.subheader("Reconstruct an attacker session")
 
-    session_ids = sorted(
-        s for s in filtered["session"].unique()
-        if s != "unknown"
-    )
+    if filtered.empty:
+        st.info("No events match your filters.")
 
-    if not session_ids:
-        st.info("No session identifiers found.")
+    elif "session" not in filtered.columns:
+        st.error("The filtered dataset has no session column.")
+
     else:
-        chosen_session = st.selectbox(
-            "Select a session ID",
-            session_ids,
+        # Exclude missing and unknown session identifiers
+        session_ids = sorted(
+            filtered.loc[
+                filtered["session"].notna()
+                & (filtered["session"].astype(str) != "unknown"),
+                "session",
+            ].astype(str).unique()
         )
 
-        session_data = filtered[
-            filtered["session"] == chosen_session
-        ].sort_values("timestamp")
+        if not session_ids:
+            st.info("No session identifiers found.")
 
-        if not session_data.empty:
-            st.write(f"Events in session: {len(session_data)}")
-
-            st.dataframe(
-                session_data[
-                    [
-                        "timestamp", "eventid", "src_ip",
-                        "src_port", "dst_ip", "dst_port", "protocol",
-                        "version", "hassh", "duration_ms", "username",
-                        "input", "message", "shasum",
-                    ]
-                ],
-                width="stretch",
-                hide_index=True,
+        else:
+            chosen_session = st.selectbox(
+                "Select a session ID",
+                session_ids,
+                key="reconstruct_session",
             )
+
+            session_data = filtered[
+                filtered["session"].astype(str) == chosen_session
+            ].copy()
+
+            if "timestamp" in session_data.columns:
+                session_data = session_data.sort_values(
+                    "timestamp"
+                )
+
+            if session_data.empty:
+                st.info("No events found for this session.")
+
+            else:
+                # --------------------------------------------------
+                # Session overview
+                # --------------------------------------------------
+
+                st.subheader("Session overview")
+
+                total_events = len(session_data)
+
+                source_ip = (
+                    session_data["src_ip"].dropna().iloc[0]
+                    if "src_ip" in session_data.columns
+                    and session_data["src_ip"].notna().any()
+                    else "Unknown"
+                )
+
+                username_values = (
+                    session_data["username"]
+                    .dropna()
+                    .astype(str)
+                    .unique()
+                    if "username" in session_data.columns
+                    else []
+                )
+
+                usernames = ", ".join(username_values[:5]) or "Unknown"
+
+                command_count = (
+                    int(
+                        session_data["eventid"]
+                        .isin(COMMAND_EVENT_IDS)
+                        .sum()
+                    )
+                    if "eventid" in session_data.columns
+                    else 0
+                )
+
+                failed_logins = (
+                    int(
+                        (
+                            session_data["eventid"]
+                            == "cowrie.login.failed"
+                        ).sum()
+                    )
+                    if "eventid" in session_data.columns
+                    else 0
+                )
+
+                successful_logins = (
+                    int(
+                        (
+                            session_data["eventid"]
+                            == "cowrie.login.success"
+                        ).sum()
+                    )
+                    if "eventid" in session_data.columns
+                    else 0
+                )
+
+                c1, c2, c3, c4 = st.columns(4)
+
+                c1.metric("Total events", f"{total_events:,}")
+                c2.metric("Command events", f"{command_count:,}")
+                c3.metric("Failed logins", failed_logins)
+                c4.metric("Successful logins", successful_logins)
+
+                st.write(f"**Session ID:** `{chosen_session}`")
+                st.write(f"**Source IP:** {source_ip}")
+                st.write(f"**Observed usernames:** {usernames}")
+
+                if "timestamp" in session_data.columns:
+                    timestamps = session_data["timestamp"].dropna()
+
+                    if not timestamps.empty:
+                        first_seen = timestamps.min()
+                        last_seen = timestamps.max()
+
+                        st.write(f"**First event:** {first_seen}")
+                        st.write(f"**Last event:** {last_seen}")
+
+                        duration_seconds = (
+                            last_seen - first_seen
+                        ).total_seconds()
+
+                        st.metric(
+                            "Observed session span",
+                            f"{duration_seconds:.1f} seconds",
+                        )
+
+                # --------------------------------------------------
+                # Event timeline
+                # --------------------------------------------------
+
+                st.subheader("Session event timeline")
+
+                if (
+                    "timestamp" in session_data.columns
+                    and "eventid" in session_data.columns
+                ):
+                    timeline = session_data[
+                        ["timestamp", "eventid"]
+                    ].dropna(subset=["timestamp"]).copy()
+
+                    if not timeline.empty:
+                        timeline["Event count"] = 1
+
+                        st.dataframe(
+                            timeline,
+                            width="stretch",
+                            hide_index=True,
+                        )
+
+                        event_counts = (
+                            session_data["eventid"]
+                            .fillna("Unknown")
+                            .value_counts()
+                            .rename_axis("Event type")
+                            .reset_index(name="Count")
+                        )
+
+                        st.subheader("Event type distribution")
+
+                        st.bar_chart(
+                            event_counts.set_index("Event type")["Count"]
+                        )
+
+                # --------------------------------------------------
+                # Command history
+                # --------------------------------------------------
+
+                st.subheader("Command history")
+
+                if "input" in session_data.columns:
+                    command_events = session_data[
+                        session_data["input"].notna()
+                        & (
+                            session_data["input"]
+                            .astype(str)
+                            .str.strip()
+                            .ne("")
+                        )
+                    ].copy()
+
+                    if not command_events.empty:
+                        command_columns = [
+                            col for col in [
+                                "timestamp",
+                                "src_ip",
+                                "eventid",
+                                "input",
+                            ]
+                            if col in command_events.columns
+                        ]
+
+                        st.dataframe(
+                            command_events[command_columns],
+                            width="stretch",
+                            hide_index=True,
+                        )
+                    else:
+                        st.info(
+                            "No command input was recorded in this session."
+                        )
+
+                # --------------------------------------------------
+                # Session evidence
+                # --------------------------------------------------
+
+                st.subheader("Complete session evidence")
+
+                evidence_columns = [
+                    "timestamp",
+                    "eventid",
+                    "src_ip",
+                    "src_port",
+                    "dst_ip",
+                    "dst_port",
+                    "protocol",
+                    "version",
+                    "hassh",
+                    "duration_ms",
+                    "username",
+                    "input",
+                    "message",
+                    "shasum",
+                ]
+
+                available_columns = [
+                    col for col in evidence_columns
+                    if col in session_data.columns
+                ]
+
+                evidence = session_data[available_columns]
+
+                st.dataframe(
+                    evidence,
+                    width="stretch",
+                    hide_index=True,
+                )
+
+                # --------------------------------------------------
+                # Download session evidence
+                # --------------------------------------------------
+
+                csv_data = evidence.to_csv(
+                    index=False
+                ).encode("utf-8")
+
+                st.download_button(
+                    "Download session evidence (CSV)",
+                    data=csv_data,
+                    file_name=f"cowrie_session_{chosen_session}.csv",
+                    mime="text/csv",
+                    key="download_session_evidence",
+                )
+
 
 
 # --------------------------------------------------
@@ -742,74 +1310,292 @@ with raw_tab:
 
     if filtered.empty:
         st.info("No events match the current filters.")
+
     else:
-        event_labels = {
-            index: (
-                f"{filtered.loc[index, 'timestamp']} | "
-                f"{filtered.loc[index, 'eventid']} | "
-                f"{filtered.loc[index, 'src_ip']} | "
-                f"{Path(filtered.loc[index, 'source_file']).name}:"
-                f"{filtered.loc[index, 'line_number']}"
+        raw_view = filtered.copy()
+
+        # --------------------------------------------------
+        # Search and filters
+        # --------------------------------------------------
+
+        st.subheader("Search and filter events")
+
+        search_query = st.text_input(
+            "Search event contents",
+            placeholder="IP address, username, command, message...",
+            key="raw_event_search",
+        )
+
+        filter_col1, filter_col2 = st.columns(2)
+
+        with filter_col1:
+            available_event_ids = sorted(
+                raw_view["eventid"]
+                .dropna()
+                .astype(str)
+                .unique()
             )
-            for index in filtered.index
-        }
 
-        st.dataframe(
-            filtered[
-                [
-                    "timestamp", "eventid", "src_ip", "session",
-                    "src_port", "dst_ip", "dst_port", "protocol",
-                    "version", "hassh", "duration_ms", "username",
-                    "input", "message", "source_file", "line_number",
+            selected_event_ids = st.multiselect(
+                "Event types",
+                options=available_event_ids,
+                key="raw_event_types",
+            )
+
+        with filter_col2:
+            available_ips = sorted(
+                raw_view["src_ip"]
+                .dropna()
+                .astype(str)
+                .unique()
+            )
+
+            selected_ips = st.multiselect(
+                "Source IP addresses",
+                options=available_ips,
+                key="raw_event_ips",
+            )
+
+        if selected_event_ids:
+            raw_view = raw_view[
+                raw_view["eventid"].astype(str).isin(
+                    selected_event_ids
+                )
+            ]
+
+        if selected_ips:
+            raw_view = raw_view[
+                raw_view["src_ip"].astype(str).isin(selected_ips)
+            ]
+
+        if search_query.strip():
+            searchable_columns = [
+                col for col in [
+                    "eventid",
+                    "src_ip",
+                    "dst_ip",
+                    "session",
+                    "username",
+                    "input",
+                    "message",
+                    "source_file",
                 ]
-            ].sort_values("timestamp", ascending=False),
-            width="stretch",
-            hide_index=True,
+                if col in raw_view.columns
+            ]
+
+            search_mask = (
+                raw_view[searchable_columns]
+                .fillna("")
+                .astype(str)
+                .apply(
+                    lambda column: safe_contains(
+                        column, search_query
+                    )
+                )
+                .any(axis=1)
+            )
+
+            raw_view = raw_view[search_mask]
+
+        # --------------------------------------------------
+        # Summary
+        # --------------------------------------------------
+
+        st.subheader("Event overview")
+
+        metric1, metric2, metric3 = st.columns(3)
+
+        metric1.metric(
+            "Matching events",
+            f"{len(raw_view):,}",
         )
 
-        event_index = st.selectbox(
-            "Inspect an individual JSON event",
-            filtered.index.tolist(),
-            format_func=event_labels.__getitem__,
-        )
-
-        selected_event = filtered.loc[event_index]
-        st.json(json.loads(selected_event["raw"]))
-
-        st.subheader("Delete this event")
-        st.caption(
-            "This permanently removes only the selected JSON line from its "
-            "source log. The action cannot be undone."
-        )
-        confirm_event_delete = st.checkbox(
-            "I understand this permanently deletes the selected event.",
-            key=(
-                f"confirm_event_delete_{selected_event['source_file']}_"
-                f"{selected_event['line_number']}"
+        metric2.metric(
+            "Unique source IPs",
+            (
+                raw_view["src_ip"].nunique()
+                if "src_ip" in raw_view.columns
+                else 0
             ),
         )
-        delete_event_submitted = st.button(
-            "Delete selected event permanently",
-            disabled=not confirm_event_delete,
-            type="primary",
+
+        metric3.metric(
+            "Unique sessions",
+            (
+                raw_view["session"].nunique()
+                if "session" in raw_view.columns
+                else 0
+            ),
         )
 
-        if delete_event_submitted:
+        if raw_view.empty:
+            st.info("No events match your search and filters.")
+
+        else:
+            # --------------------------------------------------
+            # Raw event table
+            # --------------------------------------------------
+
+            st.subheader("Matching raw events")
+
+            display_columns = [
+                "timestamp",
+                "eventid",
+                "src_ip",
+                "session",
+                "src_port",
+                "dst_ip",
+                "dst_port",
+                "protocol",
+                "version",
+                "hassh",
+                "duration_ms",
+                "username",
+                "input",
+                "message",
+                "source_file",
+                "line_number",
+            ]
+
+            available_columns = [
+                col for col in display_columns
+                if col in raw_view.columns
+            ]
+
+            raw_sorted = raw_view.sort_values(
+                "timestamp",
+                ascending=False,
+            )
+
+            st.dataframe(
+                raw_sorted[available_columns],
+                width="stretch",
+                hide_index=True,
+            )
+
+            # --------------------------------------------------
+            # Export filtered events
+            # --------------------------------------------------
+
+            export_columns = [
+                col for col in raw_view.columns
+                if col != "raw"
+            ]
+
+            export_csv = raw_view[export_columns].to_csv(
+                index=False
+            ).encode("utf-8")
+
+            st.download_button(
+                "Download filtered events as CSV",
+                data=export_csv,
+                file_name="cowrie_filtered_events.csv",
+                mime="text/csv",
+                key="download_raw_events",
+            )
+
+            # --------------------------------------------------
+            # Individual JSON event inspection
+            # --------------------------------------------------
+
+            st.subheader("Inspect an individual JSON event")
+
+            # Use the original DataFrame index to identify the source row.
+            event_labels = {}
+
+            for index, row in raw_view.iterrows():
+                timestamp = row.get("timestamp", "Unknown time")
+                event_id = row.get("eventid", "Unknown event")
+                src_ip = row.get("src_ip", "Unknown IP")
+                source_file = Path(
+                    str(row.get("source_file", "unknown"))
+                ).name
+                line_number = row.get("line_number", "?")
+
+                event_labels[index] = (
+                    f"{timestamp} | {event_id} | {src_ip} | "
+                    f"{source_file}:{line_number}"
+                )
+
+            event_index = st.selectbox(
+                "Select event",
+                options=raw_view.index.tolist(),
+                format_func=event_labels.__getitem__,
+                key="raw_event_inspector",
+            )
+
+            selected_event = raw_view.loc[event_index]
+
             try:
-                deleted_source = delete_log_entry(
-                    Path(selected_event["source_file"]),
-                    folder,
-                    int(selected_event["line_number"]),
-                    selected_event["raw"],
+                raw_json = json.loads(selected_event["raw"])
+            except (ValueError, TypeError, KeyError):
+                st.warning(
+                    "The raw event is missing or is not valid JSON."
                 )
-            except (OSError, ValueError, gzip.BadGzipFile) as exc:
-                st.error(f"Could not delete the selected event: {exc}")
-            else:
-                st.cache_data.clear()
-                st.session_state["deleted_event_notice"] = (
-                    f"Removed one event from {deleted_source.name}."
+                raw_json = None
+
+            if raw_json is not None:
+                st.json(raw_json)
+
+                # --------------------------------------------------
+                # Permanent deletion
+                # --------------------------------------------------
+
+                st.subheader("Delete this event")
+
+                st.warning(
+                    "This permanently removes the selected JSON line "
+                    "from its source log. Back up the original log first."
                 )
-                st.rerun()
+
+                st.write("**Selected event:**")
+                st.code(event_labels[event_index])
+
+                confirm_event_delete = st.checkbox(
+                    "I understand this permanently deletes the selected event.",
+                    key=(
+                        f"confirm_event_delete_"
+                        f"{selected_event.get('source_file', 'unknown')}_"
+                        f"{selected_event.get('line_number', 'unknown')}"
+                    ),
+                )
+
+                delete_event_submitted = st.button(
+                    "Delete selected event permanently",
+                    disabled=not confirm_event_delete,
+                    type="primary",
+                    key="delete_selected_raw_event",
+                )
+
+                if delete_event_submitted:
+                    try:
+                        deleted_source = delete_log_entry(
+                            Path(selected_event["source_file"]),
+                            folder,
+                            int(selected_event["line_number"]),
+                            selected_event["raw"],
+                        )
+
+                    except (
+                        OSError,
+                        ValueError,
+                        gzip.BadGzipFile,
+                        KeyError,
+                        TypeError,
+                    ) as exc:
+                        st.error(
+                            f"Could not delete the selected event: {exc}"
+                        )
+
+                    else:
+                        st.cache_data.clear()
+
+                        st.session_state["deleted_event_notice"] = (
+                            f"Removed one event from "
+                            f"{deleted_source.name}."
+                        )
+
+                        st.rerun()
 
 
 st.divider()
